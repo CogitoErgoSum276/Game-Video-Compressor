@@ -2,7 +2,8 @@ import subprocess
 import sys
 import os
 import re
-import shutil
+import time
+from datetime import timedelta
 from pathlib import Path
 
 
@@ -14,10 +15,6 @@ def get_ffmpeg_path():
 
 
 FFMPEG_PATH = get_ffmpeg_path()
-
-# --- 配置区 ---
-CRF = "26"
-PRESET = "slow"
 VIDEO_EXTS = {'.mp4', '.mkv', '.flv', '.mov', '.ts'}
 
 
@@ -36,82 +33,81 @@ def compress_video(input_path):
 
     output_file = input_file.parent / f"{input_file.stem}_x265.mp4"
 
-    print(f"\n{'=' * 60}")
-    print(f"[正在处理] {input_file.name}")
-    print(f"{'=' * 60}")
+    print(f"\n{'─' * 60}")
+    print(f"🎬 处理中: {input_file.name}")
 
     cmd = [
         FFMPEG_PATH, "-i", str(input_file),
         "-map", "0:v", "-map", "0:a",
-        "-c:v", "libx265", "-preset", PRESET, "-crf", CRF, "-pix_fmt", "yuv420p",
+        "-c:v", "libx265", "-preset", "slow", "-crf", "26", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
         "-y", str(output_file)
     ]
 
-    try:
-        # bufsize=1 和 universal_newlines=True 配合，确保实时读取
-        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   universal_newlines=True, encoding='utf-8', errors='ignore', bufsize=1)
+    start_wall_time = time.time()  # 记录开始压制的实际时间
 
-        duration_regex = re.compile(r"Duration:\s*(\d{2}:\d{2}:\d{2}\.?\d*)")
-        time_regex = re.compile(r"time=\s*(\d{2}:\d{2}:\d{2}\.?\d*)")
-        total_duration = 0
+    try:
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   universal_newlines=True, encoding='utf-8', errors='ignore')
+
+        duration_regex = re.compile(r"Duration:\s*(\d{2}:\d{2}:\d{2})")
+        time_regex = re.compile(r"time=(\d{2}:\d{2}:\d{2})")
+
+        total_duration_str = "00:00:00"
+        total_seconds = 0
 
         for line in process.stderr:
-            if total_duration == 0:
+            # 1. 抓取总时长
+            if total_seconds == 0:
                 match = duration_regex.search(line)
                 if match:
-                    total_duration = time_to_seconds(match.group(1))
+                    total_duration_str = match.group(1)
+                    total_seconds = time_to_seconds(total_duration_str)
 
-            if "frame=" in line and "time=" in line:
-                # 【重要】彻底清理掉 FFmpeg 行末可能存在的各种换行符
-                raw_stats = line.replace('\r', '').replace('\n', '').strip()
+            # 2. 抓取当前进度并刷新 UI
+            if "time=" in line and total_seconds > 0:
+                match = time_regex.search(line)
+                if match:
+                    current_time_str = match.group(1)
+                    current_seconds = time_to_seconds(current_time_str)
 
-                # 获取终端宽度并多留几个空格作为缓冲区，防止自动折行
-                terminal_width = shutil.get_terminal_size().columns - 5
+                    # 计算百分比
+                    percent = (current_seconds / total_seconds) * 100
+                    percent = min(100.0, percent)
 
-                if total_duration > 0:
-                    match = time_regex.search(line)
-                    if match:
-                        current_time = time_to_seconds(match.group(1))
-                        progress = (current_time / total_duration) * 100
-                        progress = min(100.0, max(0.0, progress))
+                    # 计算已经跑了多久（实际耗时）
+                    elapsed_seconds = int(time.time() - start_wall_time)
+                    elapsed_str = str(timedelta(seconds=elapsed_seconds))
 
-                        # 进度条占 12 格
-                        bar_length = 12
-                        filled = int(bar_length * progress // 100)
-                        bar = '█' * filled + '-' * (bar_length - filled)
+                    # 绘制 20 格进度条
+                    bar = '█' * int(percent // 5) + '-' * (20 - int(percent // 5))
 
-                        # 拼接信息
-                        output_str = f"进度: [{bar}] {progress:4.1f}% | {raw_stats}"
-
-                        # 截断并填充，确保每一行长度完全一致且不超标
-                        final_line = output_str[:terminal_width].ljust(terminal_width)
-
-                        # 使用 sys.stdout.write 配合 \r 是最稳妥的单行刷新方式
-                        sys.stdout.write(f"\r{final_line}")
-                        sys.stdout.flush()
+                    # 拼接极简输出：进度条 | 百分比 | 视频总长 | 已经耗时
+                    # 使用 \r 覆盖上一行，末尾加空格清除残影
+                    output = f"\r进度: [{bar}] {percent:>5.1f}% | 视频时长: {total_duration_str} | 已用时: {elapsed_str} "
+                    sys.stdout.write(output)
+                    sys.stdout.flush()
 
         process.wait()
         if process.returncode == 0:
-            print(f"\n\n[完成] 成功保存至: {output_file.name}")
+            print(f"\n✅ 压制完成！")
         else:
-            print(f"\n\n[失败] 请检查文件。")
+            print(f"\n❌ 压制出错，请检查原文件。")
 
     except Exception as e:
-        print(f"\n[异常] {e}")
+        print(f"\n⚠️ 异常: {e}")
 
 
 if __name__ == "__main__":
     dropped_paths = sys.argv[1:]
     if not dropped_paths:
-        print("请拖入文件或文件夹。")
-        input("\n按回车键退出...")
+        print("请将视频或文件夹拖到此处。")
+        input("\n回车退出...")
         sys.exit()
 
     target_files = []
-    for path_str in dropped_paths:
-        p = Path(path_str)
+    for p_str in dropped_paths:
+        p = Path(p_str)
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
             target_files.append(p)
         elif p.is_dir():
@@ -119,9 +115,10 @@ if __name__ == "__main__":
                 target_files.extend(list(p.rglob(f"*{ext}")))
 
     if target_files:
-        print(f"发现 {len(target_files)} 个任务...")
+        print(f"找到 {len(target_files)} 个任务，开始排队压制...")
         for file_path in target_files:
             compress_video(file_path)
 
-    print("\n任务结束。")
+    print("\n" + "─" * 60)
+    print("所有任务已处理完毕。")
     input("按回车键退出...")
