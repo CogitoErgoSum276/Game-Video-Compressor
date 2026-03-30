@@ -1,17 +1,14 @@
 import subprocess
 import sys
 import os
+import re
 from pathlib import Path
 
-# --- 核心修改：动态获取 ffmpeg 路径 ---
+# --- 获取 ffmpeg 路径 ---
 def get_ffmpeg_path():
-    """获取 ffmpeg 的绝对路径。兼容直接运行和 PyInstaller 打包后的运行环境。"""
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        # 如果是打包后的 exe，去临时目录找 ffmpeg.exe
         return os.path.join(sys._MEIPASS, 'ffmpeg.exe')
-    else:
-        # 如果是直接跑 .py 脚本，默认在当前目录或系统环境变量里找
-        return 'ffmpeg.exe'
+    return 'ffmpeg.exe'
 
 FFMPEG_PATH = get_ffmpeg_path()
 
@@ -19,6 +16,12 @@ FFMPEG_PATH = get_ffmpeg_path()
 CRF = "26"
 PRESET = "slow"
 VIDEO_EXTS = {'.mp4', '.mkv', '.flv', '.mov', '.ts'}
+
+# --- 时间转换辅助函数 ---
+def time_to_seconds(time_str):
+    """将 HH:MM:SS.xx 格式转换为秒数"""
+    h, m, s = time_str.split(':')
+    return int(h) * 3600 + int(m) * 60 + float(s)
 
 def compress_video(input_path):
     input_file = Path(input_path)
@@ -43,18 +46,48 @@ def compress_video(input_path):
     ]
     
     try:
-        process = subprocess.Popen(cmd, stderr=subprocess.STDOUT, stdout=subprocess.PIPE, 
+        # 启动 FFmpeg 并捕获标准错误输出 (FFmpeg 的日志全在 stderr 里)
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, 
                                    universal_newlines=True, encoding='utf-8', errors='ignore')
         
-        for line in process.stdout:
-            if "frame=" in line:
-                print(f"\r{line.strip()}", end="")
+        # 用于匹配时长和当前进度的正则表达式
+        duration_regex = re.compile(r"Duration:\s*(\d{2}:\d{2}:\d{2}\.?\d*)")
+        time_regex = re.compile(r"time=\s*(\d{2}:\d{2}:\d{2}\.?\d*)")
+        
+        total_duration = 0
+        
+        # 实时逐行读取 FFmpeg 的输出
+        for line in process.stderr:
+            # 1. 抓取视频总时长 (只抓取一次)
+            if total_duration == 0:
+                match = duration_regex.search(line)
+                if match:
+                    total_duration = time_to_seconds(match.group(1))
+            
+            # 2. 抓取当前处理进度并绘制进度条
+            if "time=" in line and total_duration > 0:
+                match = time_regex.search(line)
+                if match:
+                    current_time = time_to_seconds(match.group(1))
+                    progress = (current_time / total_duration) * 100
+                    progress = min(100.0, progress) # 防止计算误差超过100%
+                    
+                    # 绘制进度条UI (总长40个字符)
+                    bar_length = 40
+                    filled_length = int(bar_length * progress // 100)
+                    bar = '█' * filled_length + '-' * (bar_length - filled_length)
+                    
+                    # \r 保证在同一行刷新，不会刷屏
+                    print(f"\r压制进度: [{bar}] {progress:.1f}% ", end="")
         
         process.wait()
         if process.returncode == 0:
+            # 强制进度条显示 100% 
+            bar = '█' * 40
+            print(f"\r压制进度: [{bar}] 100.0% ", end="")
             print(f"\n\n[完成] 成功保存至: {output_file.name}")
         else:
-            print(f"\n\n[失败] FFmpeg 报错，请检查文件。")
+            print(f"\n\n[失败] FFmpeg 报错，请检查文件是否损坏。")
             
     except Exception as e:
         print(f"\n[异常] {e}")
